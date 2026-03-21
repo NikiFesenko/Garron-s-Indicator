@@ -1,0 +1,91 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Gemini_Quant_Dev
+//@version=5
+indicator("Quant Hybrid + Inverse SMC [BTC] w/ Sessions", overlay=true, max_labels_count=500)
+
+// ==========================================
+// 1. INPUTS & MTF SETTINGS
+// ==========================================
+grp_tf = "Timeframe Anchoring (Fixes LTF Noise)"
+anchorTF = input.timeframe("60", "Anchor Indicator to Timeframe", group=grp_tf) 
+
+grp_rsi = "RSI Momentum Settings"
+rsiLength    = input.int(14, "RSI Length", minval=1, group=grp_rsi)
+useSmoothing = input.bool(true, "Enable RSI Smoothing (3-EMA)", group=grp_rsi)
+
+grp_ma = "Trend Filter (7MA)"
+maLength = input.int(7, "7-Period MA Length", minval=1, group=grp_ma)
+
+grp_strat = "Strategy Toggles"
+useInverseSMC = input.bool(true, "Enable Inverse SMC Signals", group=grp_strat)
+
+grp_sessions = "Session Open Markers"
+showSessions = input.bool(true, "Show Session Open Lines", group=grp_sessions)
+
+// ==========================================
+// 2. CORE MATHEMATICAL ENGINE
+// ==========================================
+quantLogic(rLen, rSmooth, mLen) =>
+    rawRsi = ta.rsi(close, rLen)
+    r = rSmooth ? ta.ema(rawRsi, 3) : rawRsi
+    m = ta.sma(close, mLen)
+    [basis, upper, lower] = ta.bb(close, 20, 2.0)
+    w = (upper - lower) / basis
+    isSq = w < ta.percentile_linear_interpolation(w, 100, 25)
+    smc_BuyZone = low[0] > high[2] and close[1] > open[1] 
+    smc_SellZone = high[0] < low[2] and close[1] < open[1]
+    [r, m, upper, lower, isSq, smc_BuyZone, smc_SellZone]
+
+// ==========================================
+// 3. MULTI-TIMEFRAME DATA RETRIEVAL
+// ==========================================
+[rsiVal, maSignal, bbUp, bbLow, isSqueeze, smcBuys, smcSells] = request.security(syminfo.tickerid, anchorTF, quantLogic(rsiLength, useSmoothing, maLength), gaps=barmerge.gaps_off)
+
+// ==========================================
+// 4. SIGNAL GENERATION
+// ==========================================
+isRsiBull = rsiVal > 50
+priceAboveMA = close > maSignal
+
+inverseBuy  = useInverseSMC and smcSells[1] and isRsiBull and ta.crossover(close, maSignal)
+inverseSell = useInverseSMC and smcBuys[1] and not isRsiBull and ta.crossunder(close, maSignal)
+
+reboundLower = ta.lowest(low, 3) <= bbLow[1] and priceAboveMA and ta.crossover(close, maSignal)
+rejectUpper  = ta.highest(high, 3) >= bbUp[1] and not priceAboveMA and ta.crossunder(close, maSignal)
+
+finalLong  = useInverseSMC ? inverseBuy : reboundLower
+finalShort = useInverseSMC ? inverseSell : rejectUpper
+
+// ==========================================
+// 5. VISUALS & DASHBOARD UI
+// ==========================================
+plot(maSignal, "7MA Trigger", color=priceAboveMA ? #00ff88 : #ff0055, linewidth=2)
+plotshape(finalLong,  title="Buy Signal",  style=shape.labelup,   location=location.belowbar, color=#00ff88, size=size.small, text="BUY",   textcolor=color.black)
+plotshape(finalShort, title="Sell Signal", style=shape.labeldown, location=location.abovebar, color=#ff0055, size=size.small, text="SELL", textcolor=color.white)
+
+var table dash = table.new(position.top_right, 2, 3, bgcolor=color.new(color.black, 20), border_color=color.gray, border_width=1)
+if barstate.islast
+    volState = isSqueeze ? "Squeezing" : "Expanding"
+    table.cell(dash, 0, 0, "Anchor TF", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 0, anchorTF, text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 1, "RSI (" + str.tostring(rsiLength) + ")", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(math.round(rsiVal, 2)), text_color=isRsiBull ? #00ff88 : #ff0055, text_size=size.small)
+    table.cell(dash, 0, 2, "Volatility", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, volState, text_color=isSqueeze ? color.yellow : color.aqua, text_size=size.small)
+
+bgcolor(isRsiBull and priceAboveMA ? color.new(#00ff88, 95) : not isRsiBull and not priceAboveMA ? color.new(#ff0055, 95) : na)
+
+// ==========================================
+// 6. GLOBAL SESSION OPENS (WHITE LINES)
+// ==========================================
+drawOpenLine(sessionTime, labelText) =>
+    t = time("1", sessionTime, "UTC")
+    if not na(t) and na(t[1]) and showSessions
+        line.new(bar_index, low, bar_index, high, xloc.bar_index, extend.both, color.new(color.white, 80), line.style_solid, 1)
+        label.new(bar_index, high, labelText, xloc.bar_index, yloc.abovebar, color.new(color.black, 100), label.style_none, color.white, size.tiny)
+
+drawOpenLine("1430-1431:12345", "NYSE") 
+drawOpenLine("0800-0801:12345", "LSE")
+drawOpenLine("0345-0346:12345", "INDIA")
+drawOpenLine("0130-0131:12345", "CHINA")
+drawOpenLine("0000-0001:12345", "TOKYO")
